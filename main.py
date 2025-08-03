@@ -325,26 +325,26 @@ class CustomerCommands(app_commands.Group):
             dm_error = f"Errore generico: {e}"
             print(f"❌ Errore generico inviando DM: {e}")
 
-# Aggiungi informazione sul DM nella conferma dell'ordine
-embed = discord.Embed(
-    title="✅ Ordine confermato!",
-    color=discord.Color.green()
-)
-embed.add_field(name="Ordine #", value=order_id, inline=True)
-embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
-embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
-embed.add_field(name="Fornitore", value=supplier_name, inline=True)
-embed.add_field(name="Luogo", value=luogo, inline=True)
-embed.add_field(name="Orario", value=orario, inline=True)
-
-# Aggiungi stato notifica
-if dm_sent:
-    embed.add_field(name="📨 Notifica", value="✅ Fornitore notificato via DM", inline=False)
-else:
-    embed.add_field(name="📨 Notifica", value=f"❌ DM non inviato: {dm_error}", inline=False)
-    embed.add_field(name="💡 Contatto manuale", value=f"Contatta <@{supplier_id}> manualmente", inline=False)
-
-await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Aggiungi informazione sul DM nella conferma dell'ordine
+        embed = discord.Embed(
+            title="✅ Ordine confermato!",
+            color=discord.Color.green()
+        )
+        embed.add_field(name="Ordine #", value=order_id, inline=True)
+        embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
+        embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+        embed.add_field(name="Fornitore", value=supplier_name, inline=True)
+        embed.add_field(name="Luogo", value=luogo, inline=True)
+        embed.add_field(name="Orario", value=orario, inline=True)
+        
+        # Aggiungi stato notifica
+        if dm_sent:
+            embed.add_field(name="📨 Notifica", value="✅ Fornitore notificato via DM", inline=False)
+        else:
+            embed.add_field(name="📨 Notifica", value=f"❌ DM non inviato: {dm_error}", inline=False)
+            embed.add_field(name="💡 Contatto manuale", value=f"Contatta <@{supplier_id}> manualmente", inline=False)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name='ordini', description='Visualizza i tuoi ordini')
     async def view_orders(self, interaction: discord.Interaction):
