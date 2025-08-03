@@ -383,194 +383,194 @@ class CustomerCommands(app_commands.Group):
 
     # Sostituisci il comando place_order con questa versione corretta
 
-        @app_commands.command(name='ordina', description='Effettua un ordine')
-        @app_commands.describe(
-            item_id="ID dell'oggetto da ordinare",
-            quantita="Quantità da ordinare",
-            luogo="Luogo di consegna (es. Vermilion City)",
-            orario="Orario preferito (es. 20:00 o domani sera)"
-        )
-        async def place_order(self, interaction: discord.Interaction, item_id: int, quantita: int, luogo: str, orario: str):
-            # IMPORTANTE: Risposta immediata per evitare timeout
-            await interaction.response.defer(ephemeral=True)
+    @app_commands.command(name='ordina', description='Effettua un ordine')
+    @app_commands.describe(
+        item_id="ID dell'oggetto da ordinare",
+        quantita="Quantità da ordinare",
+        luogo="Luogo di consegna (es. Vermilion City)",
+        orario="Orario preferito (es. 20:00 o domani sera)"
+    )
+    async def place_order(self, interaction: discord.Interaction, item_id: int, quantita: int, luogo: str, orario: str):
+        # IMPORTANTE: Risposta immediata per evitare timeout
+        await interaction.response.defer(ephemeral=True)
+        
+        conn = sqlite3.connect('pokemmo_marketplace.db')
+        cursor = conn.cursor()
+        
+        try:
+            # Verifica disponibilità oggetto
+            cursor.execute('''
+                SELECT i.supplier_id, i.item_name, i.quantity, i.price, s.username
+                FROM inventory i
+                JOIN suppliers s ON i.supplier_id = s.user_id
+                WHERE i.id = ?
+            ''', (item_id,))
             
-            conn = sqlite3.connect('pokemmo_marketplace.db')
-            cursor = conn.cursor()
+            item_data = cursor.fetchone()
+            if not item_data:
+                await interaction.followup.send("❌ Oggetto non trovato.", ephemeral=True)
+                return
+            
+            supplier_id, item_name, available_qty, price, supplier_name = item_data
+            
+            if quantita > available_qty:
+                await interaction.followup.send(f"❌ Quantità non disponibile. Disponibili: {available_qty}", ephemeral=True)
+                return
+            
+            if interaction.user.id == supplier_id:
+                await interaction.followup.send("❌ Non puoi ordinare dai tuoi stessi oggetti!", ephemeral=True)
+                return
+            
+            total_price = price * quantita
+            
+            # Crea ordine
+            cursor.execute('''
+                INSERT INTO orders (customer_id, supplier_id, item_id, quantity, total_price, location, delivery_time)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            ''', (interaction.user.id, supplier_id, item_id, quantita, total_price, luogo, orario))
+            
+            order_id = cursor.lastrowid
+            
+            # Aggiorna inventario
+            cursor.execute('UPDATE inventory SET quantity = quantity - ? WHERE id = ?', (quantita, item_id))
+            
+            conn.commit()
+            
+            # Invia notifica al fornitore con debug dettagliato
+            dm_sent = False
+            dm_error = None
             
             try:
-                # Verifica disponibilità oggetto
-                cursor.execute('''
-                    SELECT i.supplier_id, i.item_name, i.quantity, i.price, s.username
-                    FROM inventory i
-                    JOIN suppliers s ON i.supplier_id = s.user_id
-                    WHERE i.id = ?
-                ''', (item_id,))
+                supplier = bot.get_user(supplier_id)
+                print(f"🔍 DEBUG: Tentativo invio DM a fornitore ID: {supplier_id}")
                 
-                item_data = cursor.fetchone()
-                if not item_data:
-                    await interaction.followup.send("❌ Oggetto non trovato.", ephemeral=True)
-                    return
-                
-                supplier_id, item_name, available_qty, price, supplier_name = item_data
-                
-                if quantita > available_qty:
-                    await interaction.followup.send(f"❌ Quantità non disponibile. Disponibili: {available_qty}", ephemeral=True)
-                    return
-                
-                if interaction.user.id == supplier_id:
-                    await interaction.followup.send("❌ Non puoi ordinare dai tuoi stessi oggetti!", ephemeral=True)
-                    return
-                
-                total_price = price * quantita
-                
-                # Crea ordine
-                cursor.execute('''
-                    INSERT INTO orders (customer_id, supplier_id, item_id, quantity, total_price, location, delivery_time)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                ''', (interaction.user.id, supplier_id, item_id, quantita, total_price, luogo, orario))
-                
-                order_id = cursor.lastrowid
-                
-                # Aggiorna inventario
-                cursor.execute('UPDATE inventory SET quantity = quantity - ? WHERE id = ?', (quantita, item_id))
-                
-                conn.commit()
-                
-                # Invia notifica al fornitore con debug dettagliato
-                dm_sent = False
-                dm_error = None
-                
-                try:
-                    supplier = bot.get_user(supplier_id)
-                    print(f"🔍 DEBUG: Tentativo invio DM a fornitore ID: {supplier_id}")
+                if supplier:
+                    print(f"✅ DEBUG: Utente trovato: {supplier.display_name} ({supplier.name})")
                     
-                    if supplier:
-                        print(f"✅ DEBUG: Utente trovato: {supplier.display_name} ({supplier.name})")
-                        
-                        supplier_embed = discord.Embed(
-                            title="🛒 Nuovo ordine ricevuto!",
-                            color=discord.Color.orange(),
-                            timestamp=datetime.now()
-                        )
-                        supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
-                        supplier_embed.add_field(name="Cliente", value=interaction.user.display_name, inline=True)
-                        supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
-                        supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
-                        supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
-                        supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
-                        supplier_embed.add_field(name="Contatto Discord", value=f"<@{interaction.user.id}>", inline=False)
-                        supplier_embed.set_footer(text="PokeMMO Marketplace", icon_url=bot.user.avatar.url if bot.user.avatar else None)
-                        
-                        await supplier.send(embed=supplier_embed)
-                        dm_sent = True
-                        print(f"✅ DEBUG: DM inviato con successo a {supplier.display_name}")
-                        
-                    else:
-                        dm_error = "Utente non trovato nel cache del bot"
-                        print(f"❌ DEBUG: Utente con ID {supplier_id} non trovato nel cache")
-                        
-                except discord.Forbidden:
-                    dm_error = "L'utente ha disabilitato i DM o ha bloccato il bot"
-                    print(f"❌ DEBUG: DM bloccati dall'utente {supplier_id} (Forbidden)")
+                    supplier_embed = discord.Embed(
+                        title="🛒 Nuovo ordine ricevuto!",
+                        color=discord.Color.orange(),
+                        timestamp=datetime.now()
+                    )
+                    supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
+                    supplier_embed.add_field(name="Cliente", value=interaction.user.display_name, inline=True)
+                    supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
+                    supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+                    supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
+                    supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
+                    supplier_embed.add_field(name="Contatto Discord", value=f"<@{interaction.user.id}>", inline=False)
+                    supplier_embed.set_footer(text="PokeMMO Marketplace", icon_url=bot.user.avatar.url if bot.user.avatar else None)
                     
-                except discord.HTTPException as e:
-                    dm_error = f"Errore HTTP Discord: {e}"
-                    print(f"❌ DEBUG: Errore HTTP inviando DM: {e}")
+                    await supplier.send(embed=supplier_embed)
+                    dm_sent = True
+                    print(f"✅ DEBUG: DM inviato con successo a {supplier.display_name}")
                     
-                except Exception as e:
-                    dm_error = f"Errore generico: {e}"
-                    print(f"❌ DEBUG: Errore generico inviando DM: {e}")
-                
-                # Invia conferma al cliente (USANDO FOLLOWUP, NON RESPONSE!)
-                embed = discord.Embed(
-                    title="✅ Ordine confermato!",
-                    color=discord.Color.green(),
-                    timestamp=datetime.now()
-                )
-                embed.add_field(name="Ordine #", value=order_id, inline=True)
-                embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
-                embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
-                embed.add_field(name="Fornitore", value=supplier_name, inline=True)
-                embed.add_field(name="Luogo", value=luogo, inline=True)
-                embed.add_field(name="Orario", value=orario, inline=True)
-                
-                # Aggiungi stato notifica
-                if dm_sent:
-                    embed.add_field(name="📨 Notifica", value="✅ Fornitore notificato via DM", inline=False)
-                    embed.set_footer(text="Il fornitore ha ricevuto una notifica privata")
                 else:
-                    embed.add_field(name="📨 Notifica", value=f"❌ DM non inviato: {dm_error}", inline=False)
-                    embed.add_field(name="💡 Azione richiesta", value=f"Contatta <@{supplier_id}> manualmente per l'ordine", inline=False)
-                    embed.set_footer(text="Notifica DM fallita - contatto manuale necessario")
-                
-                # IMPORTANTE: Usa followup.send, NON response.send_message!
-                await interaction.followup.send(embed=embed, ephemeral=True)
-                print(f"✅ DEBUG: Conferma ordine inviata al cliente {interaction.user.display_name}")
-                
-            except Exception as e:
-                print(f"❌ DEBUG: Errore generale nel comando ordina: {e}")
-                try:
-                    await interaction.followup.send("❌ Errore durante la creazione dell'ordine. Riprova.", ephemeral=True)
-                except:
-                    pass  # Se anche followup fallisce, non c'è niente da fare
-                
-                conn.rollback()
-                
-            # Comando debug per testare DM
-        @bot.tree.command(name='test_dm', description='Testa invio DM a un utente')
-        @app_commands.describe(user_id="ID Discord dell'utente da testare")
-        async def test_dm(interaction: discord.Interaction, user_id: str):
-            await interaction.response.defer(ephemeral=True)
-            
-            try:
-                user_id_int = int(user_id)
-                user = bot.get_user(user_id_int)
-                
-                if not user:
-                    await interaction.followup.send(f"❌ Utente con ID {user_id} non trovato nel cache del bot", ephemeral=True)
-                    return
-                
-                # Tenta invio DM di test
-                test_embed = discord.Embed(
-                    title="🧪 Test DM",
-                    description="Questo è un messaggio di test dal marketplace bot!",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now()
-                )
-                test_embed.add_field(name="Testato da", value=interaction.user.mention, inline=True)
-                test_embed.set_footer(text="Se ricevi questo messaggio, i DM funzionano!")
-                
-                await user.send(embed=test_embed)
-                
-                await interaction.followup.send(
-                    f"✅ DM di test inviato con successo a {user.display_name} ({user.name})", 
-                    ephemeral=True
-                )
-                print(f"✅ Test DM inviato a {user.display_name} da {interaction.user.display_name}")
-                
-            except ValueError:
-                await interaction.followup.send("❌ ID utente non valido. Deve essere un numero.", ephemeral=True)
-                
+                    dm_error = "Utente non trovato nel cache del bot"
+                    print(f"❌ DEBUG: Utente con ID {supplier_id} non trovato nel cache")
+                    
             except discord.Forbidden:
-                await interaction.followup.send(
-                    f"❌ L'utente {user.display_name} ha bloccato i DM o il bot", 
-                    ephemeral=True
-                )
-                print(f"❌ DM bloccati per utente {user.display_name}")
+                dm_error = "L'utente ha disabilitato i DM o ha bloccato il bot"
+                print(f"❌ DEBUG: DM bloccati dall'utente {supplier_id} (Forbidden)")
                 
             except discord.HTTPException as e:
-                await interaction.followup.send(
-                    f"❌ Errore HTTP Discord: {e}", 
-                    ephemeral=True
-                )
-                print(f"❌ Errore HTTP test DM: {e}")
+                dm_error = f"Errore HTTP Discord: {e}"
+                print(f"❌ DEBUG: Errore HTTP inviando DM: {e}")
                 
             except Exception as e:
-                await interaction.followup.send(
-                    f"❌ Errore generico: {e}", 
-                    ephemeral=True
-                )
-                print(f"❌ Errore generico test DM: {e}")
+                dm_error = f"Errore generico: {e}"
+                print(f"❌ DEBUG: Errore generico inviando DM: {e}")
+            
+            # Invia conferma al cliente (USANDO FOLLOWUP, NON RESPONSE!)
+            embed = discord.Embed(
+                title="✅ Ordine confermato!",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Ordine #", value=order_id, inline=True)
+            embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
+            embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+            embed.add_field(name="Fornitore", value=supplier_name, inline=True)
+            embed.add_field(name="Luogo", value=luogo, inline=True)
+            embed.add_field(name="Orario", value=orario, inline=True)
+            
+            # Aggiungi stato notifica
+            if dm_sent:
+                embed.add_field(name="📨 Notifica", value="✅ Fornitore notificato via DM", inline=False)
+                embed.set_footer(text="Il fornitore ha ricevuto una notifica privata")
+            else:
+                embed.add_field(name="📨 Notifica", value=f"❌ DM non inviato: {dm_error}", inline=False)
+                embed.add_field(name="💡 Azione richiesta", value=f"Contatta <@{supplier_id}> manualmente per l'ordine", inline=False)
+                embed.set_footer(text="Notifica DM fallita - contatto manuale necessario")
+            
+            # IMPORTANTE: Usa followup.send, NON response.send_message!
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            print(f"✅ DEBUG: Conferma ordine inviata al cliente {interaction.user.display_name}")
+            
+        except Exception as e:
+            print(f"❌ DEBUG: Errore generale nel comando ordina: {e}")
+            try:
+                await interaction.followup.send("❌ Errore durante la creazione dell'ordine. Riprova.", ephemeral=True)
+            except:
+                pass  # Se anche followup fallisce, non c'è niente da fare
+            
+            conn.rollback()
+                
+            # Comando debug per testare DM
+    @bot.tree.command(name='test_dm', description='Testa invio DM a un utente')
+    @app_commands.describe(user_id="ID Discord dell'utente da testare")
+    async def test_dm(interaction: discord.Interaction, user_id: str):
+        await interaction.response.defer(ephemeral=True)
+        
+        try:
+            user_id_int = int(user_id)
+            user = bot.get_user(user_id_int)
+            
+            if not user:
+                await interaction.followup.send(f"❌ Utente con ID {user_id} non trovato nel cache del bot", ephemeral=True)
+                return
+            
+            # Tenta invio DM di test
+            test_embed = discord.Embed(
+                title="🧪 Test DM",
+                description="Questo è un messaggio di test dal marketplace bot!",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            test_embed.add_field(name="Testato da", value=interaction.user.mention, inline=True)
+            test_embed.set_footer(text="Se ricevi questo messaggio, i DM funzionano!")
+            
+            await user.send(embed=test_embed)
+            
+            await interaction.followup.send(
+                f"✅ DM di test inviato con successo a {user.display_name} ({user.name})", 
+                ephemeral=True
+            )
+            print(f"✅ Test DM inviato a {user.display_name} da {interaction.user.display_name}")
+            
+        except ValueError:
+            await interaction.followup.send("❌ ID utente non valido. Deve essere un numero.", ephemeral=True)
+            
+        except discord.Forbidden:
+            await interaction.followup.send(
+                f"❌ L'utente {user.display_name} ha bloccato i DM o il bot", 
+                ephemeral=True
+            )
+            print(f"❌ DM bloccati per utente {user.display_name}")
+            
+        except discord.HTTPException as e:
+            await interaction.followup.send(
+                f"❌ Errore HTTP Discord: {e}", 
+                ephemeral=True
+            )
+            print(f"❌ Errore HTTP test DM: {e}")
+            
+        except Exception as e:
+            await interaction.followup.send(
+                f"❌ Errore generico: {e}", 
+                ephemeral=True
+            )
+            print(f"❌ Errore generico test DM: {e}")
 
     @app_commands.command(name='ordini', description='Visualizza i tuoi ordini')
     async def view_orders(self, interaction: discord.Interaction):
