@@ -87,11 +87,12 @@ class SupplierCommands(app_commands.Group):
         conn.close()
         
         await interaction.response.send_message("✅ Ti sei registrato come fornitore!", ephemeral=True)
+    
 
-    @app_commands.command(name='aggiungi', description='Aggiungi un oggetto al tuo inventario')
+    @app_commands.command(name='aggiungi', description='Aggiungi o aggiorna un oggetto nel tuo inventario')
     @app_commands.describe(
         nome="Nome dell'oggetto",
-        quantita="Quantità disponibile", 
+        quantita="Quantità da aggiungere", 
         prezzo="Prezzo per unità",
         descrizione="Descrizione opzionale"
     )
@@ -106,23 +107,190 @@ class SupplierCommands(app_commands.Group):
             conn.close()
             return
         
+        # Controlla se l'oggetto esiste già per questo fornitore
         cursor.execute('''
-            INSERT INTO inventory (supplier_id, item_name, quantity, price, description)
-            VALUES (?, ?, ?, ?, ?)
-        ''', (interaction.user.id, nome, quantita, prezzo, descrizione))
+            SELECT id, quantity, price, description 
+            FROM inventory 
+            WHERE supplier_id = ? AND LOWER(item_name) = LOWER(?)
+        ''', (interaction.user.id, nome))
+        
+        existing_item = cursor.fetchone()
+        
+        if existing_item:
+            # Oggetto esiste già - chiedi cosa fare
+            item_id, current_qty, current_price, current_desc = existing_item
+            
+            embed = discord.Embed(
+                title="🔄 Oggetto già presente nell'inventario",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Oggetto", value=nome, inline=True)
+            embed.add_field(name="Quantità attuale", value=current_qty, inline=True)
+            embed.add_field(name="Prezzo attuale", value=f"{current_price:,} ¥", inline=True)
+            
+            if current_desc:
+                embed.add_field(name="Descrizione attuale", value=current_desc, inline=False)
+            
+            embed.add_field(name="🔄 Azione", value="Aggiorno quantità e prezzo automaticamente", inline=False)
+            
+            # Aggiorna quantità e prezzo
+            new_quantity = current_qty + quantita
+            
+            cursor.execute('''
+                UPDATE inventory 
+                SET quantity = ?, price = ?, description = ?
+                WHERE id = ?
+            ''', (new_quantity, prezzo, descrizione or current_desc, item_id))
+            
+            embed.add_field(name="✅ Risultato", value=f"**Nuova quantità:** {new_quantity}\n**Nuovo prezzo:** {prezzo:,} ¥", inline=False)
+            
+            action = "aggiornato"
+            
+        else:
+            # Nuovo oggetto - crea entry
+            cursor.execute('''
+                INSERT INTO inventory (supplier_id, item_name, quantity, price, description)
+                VALUES (?, ?, ?, ?, ?)
+            ''', (interaction.user.id, nome, quantita, prezzo, descrizione))
+            
+            embed = discord.Embed(
+                title="✅ Nuovo oggetto aggiunto",
+                color=discord.Color.green()
+            )
+            embed.add_field(name="Oggetto", value=nome, inline=True)
+            embed.add_field(name="Quantità", value=quantita, inline=True)
+            embed.add_field(name="Prezzo", value=f"{prezzo:,} ¥", inline=True)
+            
+            if descrizione:
+                embed.add_field(name="Descrizione", value=descrizione, inline=False)
+            
+            action = "aggiunto"
+        
+        conn.commit()
+        conn.close()
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # Aggiungi anche un comando specifico per aggiornare solo la quantità
+    @app_commands.command(name='aggiorna', description='Aggiorna quantità o prezzo di un oggetto esistente')
+    @app_commands.describe(
+        item_id="ID dell'oggetto da aggiornare",
+        quantita="Nuova quantità totale (opzionale)",
+        prezzo="Nuovo prezzo (opzionale)"
+    )
+    async def update_item(self, interaction: discord.Interaction, item_id: int, quantita: int = None, prezzo: int = None):
+        if quantita is None and prezzo is None:
+            await interaction.response.send_message("❌ Devi specificare almeno quantità o prezzo da aggiornare!", ephemeral=True)
+            return
+        
+        conn = sqlite3.connect('pokemmo_marketplace.db')
+        cursor = conn.cursor()
+        
+        # Verifica che l'oggetto appartenga al fornitore
+        cursor.execute('''
+            SELECT item_name, quantity, price FROM inventory 
+            WHERE id = ? AND supplier_id = ?
+        ''', (item_id, interaction.user.id))
+        
+        item_data = cursor.fetchone()
+        if not item_data:
+            await interaction.response.send_message("❌ Oggetto non trovato o non autorizzato.", ephemeral=True)
+            conn.close()
+            return
+        
+        item_name, current_qty, current_price = item_data
+        
+        # Prepara gli aggiornamenti
+        updates = []
+        values = []
+        
+        if quantita is not None:
+            updates.append("quantity = ?")
+            values.append(quantita)
+        
+        if prezzo is not None:
+            updates.append("price = ?")
+            values.append(prezzo)
+        
+        values.append(item_id)
+        
+        # Esegui aggiornamento
+        cursor.execute(f'''
+            UPDATE inventory SET {", ".join(updates)}
+            WHERE id = ?
+        ''', values)
         
         conn.commit()
         conn.close()
         
         embed = discord.Embed(
-            title="✅ Oggetto aggiunto",
+            title="🔄 Oggetto aggiornato",
+            color=discord.Color.blue()
+        )
+        embed.add_field(name="Oggetto", value=f"#{item_id} - {item_name}", inline=True)
+        
+        if quantita is not None:
+            embed.add_field(name="Quantità", value=f"{current_qty} → {quantita}", inline=True)
+        
+        if prezzo is not None:
+            embed.add_field(name="Prezzo", value=f"{current_price:,} ¥ → {prezzo:,} ¥", inline=True)
+        
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+    
+    # Aggiungi comando per gestire duplicati esistenti
+    @app_commands.command(name='unisci', description='Unisci oggetti duplicati nel tuo inventario')
+    @app_commands.describe(nome="Nome dell'oggetto da unificare")
+    async def merge_items(self, interaction: discord.Interaction, nome: str):
+        conn = sqlite3.connect('pokemmo_marketplace.db')
+        cursor = conn.cursor()
+        
+        # Trova tutti gli oggetti con lo stesso nome per questo fornitore
+        cursor.execute('''
+            SELECT id, quantity, price, description 
+            FROM inventory 
+            WHERE supplier_id = ? AND LOWER(item_name) = LOWER(?)
+            ORDER BY id
+        ''', (interaction.user.id, nome))
+        
+        duplicates = cursor.fetchall()
+        
+        if len(duplicates) <= 1:
+            await interaction.response.send_message("❌ Non ci sono duplicati per questo oggetto.", ephemeral=True)
+            conn.close()
+            return
+        
+        # Calcola totali
+        total_quantity = sum(item[1] for item in duplicates)
+        latest_price = duplicates[-1][2]  # Usa il prezzo più recente
+        latest_description = duplicates[-1][3] or ""  # Usa la descrizione più recente
+        
+        # Mantieni il primo ID, elimina gli altri
+        keep_id = duplicates[0][0]
+        delete_ids = [item[0] for item in duplicates[1:]]
+        
+        # Aggiorna il primo oggetto con i totali
+        cursor.execute('''
+            UPDATE inventory 
+            SET quantity = ?, price = ?, description = ?
+            WHERE id = ?
+        ''', (total_quantity, latest_price, latest_description, keep_id))
+        
+        # Elimina i duplicati
+        for delete_id in delete_ids:
+            cursor.execute('DELETE FROM inventory WHERE id = ?', (delete_id,))
+        
+        conn.commit()
+        conn.close()
+        
+        embed = discord.Embed(
+            title="🔄 Oggetti unificati",
             color=discord.Color.green()
         )
         embed.add_field(name="Oggetto", value=nome, inline=True)
-        embed.add_field(name="Quantità", value=quantita, inline=True)
-        embed.add_field(name="Prezzo", value=f"{prezzo:,} ¥", inline=True)
-        if descrizione:
-            embed.add_field(name="Descrizione", value=descrizione, inline=False)
+        embed.add_field(name="Quantità totale", value=total_quantity, inline=True)
+        embed.add_field(name="Prezzo finale", value=f"{latest_price:,} ¥", inline=True)
+        embed.add_field(name="Duplicati rimossi", value=len(delete_ids), inline=True)
+        embed.add_field(name="ID mantenuto", value=f"#{keep_id}", inline=True)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
