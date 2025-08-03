@@ -280,25 +280,71 @@ class CustomerCommands(app_commands.Group):
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
         
-        # Invia notifica al fornitore
-        try:
-            supplier = bot.get_user(supplier_id)
-            if supplier:
-                supplier_embed = discord.Embed(
-                    title="🛒 Nuovo ordine ricevuto!",
-                    color=discord.Color.orange()
-                )
-                supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
-                supplier_embed.add_field(name="Cliente", value=interaction.user.display_name, inline=True)
-                supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
-                supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
-                supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
-                supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
-                supplier_embed.add_field(name="Contatto Discord", value=f"<@{interaction.user.id}>", inline=False)
-                
-                await supplier.send(embed=supplier_embed)
-        except:
-            pass  # Se non riesce a inviare DM al fornitore
+       # Sostituisci la parte del DM nel comando place_order con questo codice migliorato
+
+# Invia notifica al fornitore (VERSIONE MIGLIORATA)
+dm_sent = False
+dm_error = None
+
+try:
+    supplier = bot.get_user(supplier_id)
+    print(f"🔍 Tentativo invio DM a fornitore ID: {supplier_id}")
+    
+    if supplier:
+        print(f"✅ Utente trovato: {supplier.display_name}")
+        
+        supplier_embed = discord.Embed(
+            title="🛒 Nuovo ordine ricevuto!",
+            color=discord.Color.orange()
+        )
+        supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
+        supplier_embed.add_field(name="Cliente", value=interaction.user.display_name, inline=True)
+        supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
+        supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+        supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
+        supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
+        supplier_embed.add_field(name="Contatto Discord", value=f"<@{interaction.user.id}>", inline=False)
+        
+        await supplier.send(embed=supplier_embed)
+        dm_sent = True
+        print(f"✅ DM inviato con successo a {supplier.display_name}")
+        
+    else:
+        dm_error = "Utente non trovato"
+        print(f"❌ Utente con ID {supplier_id} non trovato")
+        
+except discord.Forbidden:
+    dm_error = "DM bloccati dall'utente"
+    print(f"❌ DM bloccati dall'utente {supplier_id}")
+    
+except discord.HTTPException as e:
+    dm_error = f"Errore HTTP: {e}"
+    print(f"❌ Errore HTTP inviando DM: {e}")
+    
+except Exception as e:
+    dm_error = f"Errore generico: {e}"
+    print(f"❌ Errore generico inviando DM: {e}")
+
+# Aggiungi informazione sul DM nella conferma dell'ordine
+embed = discord.Embed(
+    title="✅ Ordine confermato!",
+    color=discord.Color.green()
+)
+embed.add_field(name="Ordine #", value=order_id, inline=True)
+embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
+embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+embed.add_field(name="Fornitore", value=supplier_name, inline=True)
+embed.add_field(name="Luogo", value=luogo, inline=True)
+embed.add_field(name="Orario", value=orario, inline=True)
+
+# Aggiungi stato notifica
+if dm_sent:
+    embed.add_field(name="📨 Notifica", value="✅ Fornitore notificato via DM", inline=False)
+else:
+    embed.add_field(name="📨 Notifica", value=f"❌ DM non inviato: {dm_error}", inline=False)
+    embed.add_field(name="💡 Contatto manuale", value=f"Contatta <@{supplier_id}> manualmente", inline=False)
+
+await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(name='ordini', description='Visualizza i tuoi ordini')
     async def view_orders(self, interaction: discord.Interaction):
