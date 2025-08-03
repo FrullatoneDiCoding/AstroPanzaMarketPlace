@@ -1,5 +1,3 @@
-# Sistema Ordini Interattivo - Aggiungi DOPO gli import e PRIMA delle classi
-
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -8,6 +6,58 @@ import asyncio
 from datetime import datetime
 import json
 import os
+
+# Configurazione bot
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Inizializzazione database
+def init_db():
+    conn = sqlite3.connect('pokemmo_marketplace.db')
+    cursor = conn.cursor()
+    
+    # Tabella fornitori
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS suppliers (
+            user_id INTEGER PRIMARY KEY,
+            username TEXT NOT NULL,
+            active BOOLEAN DEFAULT TRUE
+        )
+    ''')
+    
+    # Tabella inventario
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS inventory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            supplier_id INTEGER,
+            item_name TEXT NOT NULL,
+            quantity INTEGER NOT NULL,
+            price INTEGER NOT NULL,
+            description TEXT,
+            FOREIGN KEY (supplier_id) REFERENCES suppliers (user_id)
+        )
+    ''')
+    
+    # Tabella ordini
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS orders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            customer_id INTEGER NOT NULL,
+            supplier_id INTEGER NOT NULL,
+            item_id INTEGER NOT NULL,
+            quantity INTEGER NOT NULL,
+            total_price INTEGER NOT NULL,
+            location TEXT NOT NULL,
+            delivery_time TEXT NOT NULL,
+            status TEXT DEFAULT 'pending',
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (item_id) REFERENCES inventory (id),
+            FOREIGN KEY (supplier_id) REFERENCES suppliers (user_id)
+        )
+    ''')
+    
+    conn.commit()
+    conn.close()
 
 # Classe per i bottoni del fornitore (DM)
 class SupplierOrderView(discord.ui.View):
@@ -41,12 +91,7 @@ class SupplierOrderView(discord.ui.View):
             customer_id, item_name, quantity, total_price, supplier_name = order_data
             
             # Aggiorna status a completed
-            cursor.execute('''
-                UPDATE orders 
-                SET status = 'completed', completed_at = CURRENT_TIMESTAMP 
-                WHERE id = ?
-            ''', (self.order_id,))
-            
+            cursor.execute('UPDATE orders SET status = \'completed\' WHERE id = ?', (self.order_id,))
             conn.commit()
             
             # Aggiorna il messaggio del fornitore
@@ -250,147 +295,67 @@ class CustomerOrderView(discord.ui.View):
             cursor.close()
             conn.close()
 
-    # Comando per vedere ordini con bottoni (SOSTITUISCE il comando view_orders)
-    @app_commands.command(name='ordini', description='Visualizza i tuoi ordini con opzioni di gestione')
-    async def view_orders_interactive(self, interaction: discord.Interaction):
-        conn = sqlite3.connect('pokemmo_marketplace.db')
-        cursor = conn.cursor()
+# Funzione per inviare DM al fornitore con bottoni
+async def send_supplier_notification_with_buttons(order_id, supplier_id, supplier_name, item_name, quantita, total_price, luogo, orario, customer):
+    """Invia notifica DM al fornitore con bottoni interattivi"""
+    dm_sent = False
+    dm_error = None
+    
+    try:
+        print(f"🔍 DEBUG: Tentativo invio DM a fornitore ID: {supplier_id}")
         
-        cursor.execute('''
-            SELECT o.id, i.item_name, o.quantity, o.total_price, o.location, 
-                   o.delivery_time, o.status, s.username, o.created_at, o.supplier_id
-            FROM orders o
-            JOIN inventory i ON o.item_id = i.id
-            JOIN suppliers s ON o.supplier_id = s.user_id
-            WHERE o.customer_id = ?
-            ORDER BY o.created_at DESC
-            LIMIT 10
-        ''', (interaction.user.id,))
+        supplier = await bot.fetch_user(supplier_id)
+        print(f"✅ DEBUG: Utente fetchato da API: {supplier.display_name} ({supplier.name})")
         
-        orders = cursor.fetchall()
-        conn.close()
-        
-        if not orders:
-            await interaction.response.send_message("📝 Non hai ancora effettuato ordini.", ephemeral=True)
-            return
-        
-        # Separa ordini pending dagli altri
-        pending_orders = [order for order in orders if order[6] == 'pending']
-        completed_orders = [order for order in orders if order[6] != 'pending']
-        
-        embeds = []
-        views = []
-        
-        # Ordini pending con bottoni
-        for order_id, item_name, qty, total, location, delivery_time, status, supplier, created, supplier_id in pending_orders:
-            embed = discord.Embed(
-                title=f"⏳ Ordine #{order_id} - IN ATTESA",
-                color=discord.Color.orange(),
-                timestamp=datetime.fromisoformat(created.replace('Z', '+00:00')) if 'Z' in created else datetime.now()
-            )
-            embed.add_field(name="Oggetto", value=f"{item_name} x{qty}", inline=True)
-            embed.add_field(name="Totale", value=f"{total:,} ¥", inline=True)
-            embed.add_field(name="Fornitore", value=supplier, inline=True)
-            embed.add_field(name="Luogo", value=location, inline=True)
-            embed.add_field(name="Orario", value=delivery_time, inline=True)
-            embed.add_field(name="Status", value="⏳ In attesa", inline=True)
-            embed.set_footer(text="Puoi annullare questo ordine usando il bottone sotto")
-            
-            view = CustomerOrderView(order_id, supplier_id)
-            embeds.append(embed)
-            views.append(view)
-        
-        # Ordini completati/annullati (solo visualizzazione)
-        if completed_orders:
-            history_embed = discord.Embed(
-                title="📋 Storico Ordini",
-                color=discord.Color.blue()
-            )
-            
-            for order_id, item_name, qty, total, location, delivery_time, status, supplier, created, supplier_id in completed_orders[:5]:
-                status_emoji = "✅" if status == "completed" else "❌" if status == "cancelled" else "⏳"
-                value = (f"**Oggetto:** {item_name} x{qty}\n"
-                        f"**Totale:** {total:,} ¥\n"
-                        f"**Fornitore:** {supplier}\n"
-                        f"**Status:** {status_emoji} {status.upper()}")
-                
-                history_embed.add_field(name=f"Ordine #{order_id}", value=value, inline=False)
-            
-            embeds.append(history_embed)
-            views.append(None)
-        
-        # Invia i messaggi
-        if not embeds:
-            await interaction.response.send_message("📝 Non hai ordini attivi.", ephemeral=True)
-            return
-        
-        # Primo messaggio
-        await interaction.response.send_message(
-            embed=embeds[0], 
-            view=views[0], 
-            ephemeral=True
+        supplier_embed = discord.Embed(
+            title="🛒 Nuovo ordine ricevuto!",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
         )
+        supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
+        supplier_embed.add_field(name="Cliente", value=customer.display_name, inline=True)
+        supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
+        supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+        supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
+        supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
+        supplier_embed.add_field(name="Contatto Discord", value=f"<@{customer.id}>", inline=False)
+        supplier_embed.set_footer(text="Usa i bottoni sotto per gestire l'ordine")
         
-        # Messaggi aggiuntivi
-        for i in range(1, len(embeds)):
-            await interaction.followup.send(
-                embed=embeds[i], 
-                view=views[i], 
-                ephemeral=True
-            )
+        # Crea i bottoni per il fornitore
+        view = SupplierOrderView(order_id, customer.id)
+        
+        await supplier.send(embed=supplier_embed, view=view)
+        dm_sent = True
+        print(f"✅ DEBUG: DM con bottoni inviato con successo a {supplier.display_name}")
+        
+    except discord.NotFound:
+        dm_error = "Utente non esistente su Discord"
+        print(f"❌ DEBUG: Utente {supplier_id} non esiste su Discord")
+        
+    except discord.Forbidden:
+        dm_error = "L'utente ha disabilitato i DM o ha bloccato il bot"
+        print(f"❌ DEBUG: DM bloccati dall'utente {supplier_id} (Forbidden)")
+        
+    except discord.HTTPException as e:
+        dm_error = f"Errore HTTP Discord: {e}"
+        print(f"❌ DEBUG: Errore HTTP inviando DM: {e}")
+        
+    except Exception as e:
+        dm_error = f"Errore generico: {e}"
+        print(f"❌ DEBUG: Errore generico inviando DM: {e}")
     
-    # AGGIORNA anche il comando place_order per includere i bottoni nel DM del fornitore
-    # Sostituisci la parte dell'invio DM nel place_order con questa:
-    
-    async def send_supplier_notification_with_buttons(order_id, supplier_id, supplier_name, item_name, quantita, total_price, luogo, orario, customer):
-        """Invia notifica DM al fornitore con bottoni interattivi"""
-        dm_sent = False
-        dm_error = None
-        
-        try:
-            print(f"🔍 DEBUG: Tentativo invio DM a fornitore ID: {supplier_id}")
-            
-            supplier = await bot.fetch_user(supplier_id)
-            print(f"✅ DEBUG: Utente fetchato da API: {supplier.display_name} ({supplier.name})")
-            
-            supplier_embed = discord.Embed(
-                title="🛒 Nuovo ordine ricevuto!",
-                color=discord.Color.orange(),
-                timestamp=datetime.now()
-            )
-            supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
-            supplier_embed.add_field(name="Cliente", value=customer.display_name, inline=True)
-            supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
-            supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
-            supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
-            supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
-            supplier_embed.add_field(name="Contatto Discord", value=f"<@{customer.id}>", inline=False)
-            supplier_embed.set_footer(text="Usa i bottoni sotto per gestire l'ordine")
-            
-            # Crea i bottoni per il fornitore
-            view = SupplierOrderView(order_id, customer.id)
-            
-            await supplier.send(embed=supplier_embed, view=view)
-            dm_sent = True
-            print(f"✅ DEBUG: DM con bottoni inviato con successo a {supplier.display_name}")
-            
-        except discord.NotFound:
-            dm_error = "Utente non esistente su Discord"
-            print(f"❌ DEBUG: Utente {supplier_id} non esiste su Discord")
-            
-        except discord.Forbidden:
-            dm_error = "L'utente ha disabilitato i DM o ha bloccato il bot"
-            print(f"❌ DEBUG: DM bloccati dall'utente {supplier_id} (Forbidden)")
-            
-        except discord.HTTPException as e:
-            dm_error = f"Errore HTTP Discord: {e}"
-            print(f"❌ DEBUG: Errore HTTP inviando DM: {e}")
-            
-        except Exception as e:
-            dm_error = f"Errore generico: {e}"
-            print(f"❌ DEBUG: Errore generico inviando DM: {e}")
-        
-        return dm_sent, dm_error
+    return dm_sent, dm_error
+
+@bot.event
+async def on_ready():
+    print(f'🎮 {bot.user} è online e pronto!')
+    print(f'📊 Connesso a {len(bot.guilds)} server(s)')
+    init_db()
+    try:
+        synced = await bot.tree.sync()
+        print(f"✅ Sincronizzati {len(synced)} comandi slash.")
+    except Exception as e:
+        print(f"❌ Errore nella sincronizzazione: {e}")
 
 # Gruppo comandi fornitore
 class SupplierCommands(app_commands.Group):
@@ -408,7 +373,6 @@ class SupplierCommands(app_commands.Group):
         conn.close()
         
         await interaction.response.send_message("✅ Ti sei registrato come fornitore!", ephemeral=True)
-    
 
     @app_commands.command(name='aggiungi', description='Aggiungi o aggiorna un oggetto nel tuo inventario')
     @app_commands.describe(
@@ -438,23 +402,8 @@ class SupplierCommands(app_commands.Group):
         existing_item = cursor.fetchone()
         
         if existing_item:
-            # Oggetto esiste già - chiedi cosa fare
+            # Oggetto esiste già - aggiorna quantità e prezzo
             item_id, current_qty, current_price, current_desc = existing_item
-            
-            embed = discord.Embed(
-                title="🔄 Oggetto già presente nell'inventario",
-                color=discord.Color.orange()
-            )
-            embed.add_field(name="Oggetto", value=nome, inline=True)
-            embed.add_field(name="Quantità attuale", value=current_qty, inline=True)
-            embed.add_field(name="Prezzo attuale", value=f"{current_price:,} ¥", inline=True)
-            
-            if current_desc:
-                embed.add_field(name="Descrizione attuale", value=current_desc, inline=False)
-            
-            embed.add_field(name="🔄 Azione", value="Aggiorno quantità e prezzo automaticamente", inline=False)
-            
-            # Aggiorna quantità e prezzo
             new_quantity = current_qty + quantita
             
             cursor.execute('''
@@ -463,9 +412,13 @@ class SupplierCommands(app_commands.Group):
                 WHERE id = ?
             ''', (new_quantity, prezzo, descrizione or current_desc, item_id))
             
-            embed.add_field(name="✅ Risultato", value=f"**Nuova quantità:** {new_quantity}\n**Nuovo prezzo:** {prezzo:,} ¥", inline=False)
-            
-            action = "aggiornato"
+            embed = discord.Embed(
+                title="🔄 Oggetto aggiornato",
+                color=discord.Color.orange()
+            )
+            embed.add_field(name="Oggetto", value=nome, inline=True)
+            embed.add_field(name="Quantità", value=f"{current_qty} → {new_quantity} (+{quantita})", inline=True)
+            embed.add_field(name="Prezzo", value=f"{prezzo:,} ¥", inline=True)
             
         else:
             # Nuovo oggetto - crea entry
@@ -481,137 +434,12 @@ class SupplierCommands(app_commands.Group):
             embed.add_field(name="Oggetto", value=nome, inline=True)
             embed.add_field(name="Quantità", value=quantita, inline=True)
             embed.add_field(name="Prezzo", value=f"{prezzo:,} ¥", inline=True)
-            
-            if descrizione:
-                embed.add_field(name="Descrizione", value=descrizione, inline=False)
-            
-            action = "aggiunto"
+        
+        if descrizione:
+            embed.add_field(name="Descrizione", value=descrizione, inline=False)
         
         conn.commit()
         conn.close()
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    # Aggiungi anche un comando specifico per aggiornare solo la quantità
-    @app_commands.command(name='aggiorna', description='Aggiorna quantità o prezzo di un oggetto esistente')
-    @app_commands.describe(
-        item_id="ID dell'oggetto da aggiornare",
-        quantita="Nuova quantità totale (opzionale)",
-        prezzo="Nuovo prezzo (opzionale)"
-    )
-    async def update_item(self, interaction: discord.Interaction, item_id: int, quantita: int = None, prezzo: int = None):
-        if quantita is None and prezzo is None:
-            await interaction.response.send_message("❌ Devi specificare almeno quantità o prezzo da aggiornare!", ephemeral=True)
-            return
-        
-        conn = sqlite3.connect('pokemmo_marketplace.db')
-        cursor = conn.cursor()
-        
-        # Verifica che l'oggetto appartenga al fornitore
-        cursor.execute('''
-            SELECT item_name, quantity, price FROM inventory 
-            WHERE id = ? AND supplier_id = ?
-        ''', (item_id, interaction.user.id))
-        
-        item_data = cursor.fetchone()
-        if not item_data:
-            await interaction.response.send_message("❌ Oggetto non trovato o non autorizzato.", ephemeral=True)
-            conn.close()
-            return
-        
-        item_name, current_qty, current_price = item_data
-        
-        # Prepara gli aggiornamenti
-        updates = []
-        values = []
-        
-        if quantita is not None:
-            updates.append("quantity = ?")
-            values.append(quantita)
-        
-        if prezzo is not None:
-            updates.append("price = ?")
-            values.append(prezzo)
-        
-        values.append(item_id)
-        
-        # Esegui aggiornamento
-        cursor.execute(f'''
-            UPDATE inventory SET {", ".join(updates)}
-            WHERE id = ?
-        ''', values)
-        
-        conn.commit()
-        conn.close()
-        
-        embed = discord.Embed(
-            title="🔄 Oggetto aggiornato",
-            color=discord.Color.blue()
-        )
-        embed.add_field(name="Oggetto", value=f"#{item_id} - {item_name}", inline=True)
-        
-        if quantita is not None:
-            embed.add_field(name="Quantità", value=f"{current_qty} → {quantita}", inline=True)
-        
-        if prezzo is not None:
-            embed.add_field(name="Prezzo", value=f"{current_price:,} ¥ → {prezzo:,} ¥", inline=True)
-        
-        await interaction.response.send_message(embed=embed, ephemeral=True)
-    
-    # Aggiungi comando per gestire duplicati esistenti
-    @app_commands.command(name='unisci', description='Unisci oggetti duplicati nel tuo inventario')
-    @app_commands.describe(nome="Nome dell'oggetto da unificare")
-    async def merge_items(self, interaction: discord.Interaction, nome: str):
-        conn = sqlite3.connect('pokemmo_marketplace.db')
-        cursor = conn.cursor()
-        
-        # Trova tutti gli oggetti con lo stesso nome per questo fornitore
-        cursor.execute('''
-            SELECT id, quantity, price, description 
-            FROM inventory 
-            WHERE supplier_id = ? AND LOWER(item_name) = LOWER(?)
-            ORDER BY id
-        ''', (interaction.user.id, nome))
-        
-        duplicates = cursor.fetchall()
-        
-        if len(duplicates) <= 1:
-            await interaction.response.send_message("❌ Non ci sono duplicati per questo oggetto.", ephemeral=True)
-            conn.close()
-            return
-        
-        # Calcola totali
-        total_quantity = sum(item[1] for item in duplicates)
-        latest_price = duplicates[-1][2]  # Usa il prezzo più recente
-        latest_description = duplicates[-1][3] or ""  # Usa la descrizione più recente
-        
-        # Mantieni il primo ID, elimina gli altri
-        keep_id = duplicates[0][0]
-        delete_ids = [item[0] for item in duplicates[1:]]
-        
-        # Aggiorna il primo oggetto con i totali
-        cursor.execute('''
-            UPDATE inventory 
-            SET quantity = ?, price = ?, description = ?
-            WHERE id = ?
-        ''', (total_quantity, latest_price, latest_description, keep_id))
-        
-        # Elimina i duplicati
-        for delete_id in delete_ids:
-            cursor.execute('DELETE FROM inventory WHERE id = ?', (delete_id,))
-        
-        conn.commit()
-        conn.close()
-        
-        embed = discord.Embed(
-            title="🔄 Oggetti unificati",
-            color=discord.Color.green()
-        )
-        embed.add_field(name="Oggetto", value=nome, inline=True)
-        embed.add_field(name="Quantità totale", value=total_quantity, inline=True)
-        embed.add_field(name="Prezzo finale", value=f"{latest_price:,} ¥", inline=True)
-        embed.add_field(name="Duplicati rimossi", value=len(delete_ids), inline=True)
-        embed.add_field(name="ID mantenuto", value=f"#{keep_id}", inline=True)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -639,11 +467,20 @@ class SupplierCommands(app_commands.Group):
             color=discord.Color.blue()
         )
         
+        total_value = 0
         for item_id, name, qty, price, desc in items:
             value = f"**Quantità:** {qty}\n**Prezzo:** {price:,} ¥"
             if desc:
                 value += f"\n**Descrizione:** {desc}"
+            
+            # Calcola valore totale
+            item_value = qty * price
+            total_value += item_value
+            value += f"\n**Valore:** {item_value:,} ¥"
+            
             embed.add_field(name=f"#{item_id} - {name}", value=value, inline=False)
+        
+        embed.add_field(name="💰 Valore Totale Inventario", value=f"{total_value:,} ¥", inline=False)
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
@@ -701,8 +538,6 @@ class CustomerCommands(app_commands.Group):
             embed.add_field(name=f"#{item_id} - {name}", value=value, inline=False)
         
         await interaction.response.send_message(embed=embed)
-
-
 
     @app_commands.command(name='ordina', description='Effettua un ordine')
     @app_commands.describe(
@@ -803,107 +638,193 @@ class CustomerCommands(app_commands.Group):
         finally:
             cursor.close()
             conn.close()
-                
-            
 
-    
-
-
-    # Comando per fornitori per vedere i loro ordini ricevuti
-    @bot.tree.command(name='ordini_ricevuti', description='[FORNITORI] Visualizza ordini ricevuti dai clienti')
-    async def view_received_orders(interaction: discord.Interaction):
+    @app_commands.command(name='ordini', description='Visualizza i tuoi ordini con opzioni di gestione')
+    async def view_orders(self, interaction: discord.Interaction):
         conn = sqlite3.connect('pokemmo_marketplace.db')
         cursor = conn.cursor()
         
-        # Verifica che sia un fornitore registrato
-        cursor.execute('SELECT user_id FROM suppliers WHERE user_id = ? AND active = TRUE', (interaction.user.id,))
-        if not cursor.fetchone():
-            await interaction.response.send_message("❌ Devi essere registrato come fornitore!", ephemeral=True)
-            cursor.close()
-            conn.close()
-            return
-        
         cursor.execute('''
             SELECT o.id, i.item_name, o.quantity, o.total_price, o.location, 
-                   o.delivery_time, o.status, o.created_at, o.customer_id
+                   o.delivery_time, o.status, s.username, o.created_at, o.supplier_id
             FROM orders o
             JOIN inventory i ON o.item_id = i.id
-            WHERE o.supplier_id = ?
+            JOIN suppliers s ON o.supplier_id = s.user_id
+            WHERE o.customer_id = ?
             ORDER BY o.created_at DESC
-            LIMIT 15
+            LIMIT 10
         ''', (interaction.user.id,))
         
         orders = cursor.fetchall()
         conn.close()
         
         if not orders:
-            await interaction.response.send_message("📝 Non hai ancora ricevuto ordini.", ephemeral=True)
+            await interaction.response.send_message("📝 Non hai ancora effettuato ordini.", ephemeral=True)
             return
         
-        # Separa per status
+        # Separa ordini pending dagli altri
         pending_orders = [order for order in orders if order[6] == 'pending']
-        completed_orders = [order for order in orders if order[6] == 'completed']
-        cancelled_orders = [order for order in orders if order[6] == 'cancelled']
+        completed_orders = [order for order in orders if order[6] != 'pending']
         
         embeds = []
+        views = []
         
-        # Ordini pending
-        if pending_orders:
-            pending_embed = discord.Embed(
-                title="⏳ Ordini in Attesa",
-                color=discord.Color.orange(),
-                description=f"Hai {len(pending_orders)} ordini da gestire"
+        # Ordini pending con bottoni
+        for order_id, item_name, qty, total, location, delivery_time, status, supplier, created, supplier_id in pending_orders:
+            embed = discord.Embed(
+                title=f"⏳ Ordine #{order_id} - IN ATTESA",
+                color=discord.Color.orange()
             )
+            embed.add_field(name="Oggetto", value=f"{item_name} x{qty}", inline=True)
+            embed.add_field(name="Totale", value=f"{total:,} ¥", inline=True)
+            embed.add_field(name="Fornitore", value=supplier, inline=True)
+            embed.add_field(name="Luogo", value=location, inline=True)
+            embed.add_field(name="Orario", value=delivery_time, inline=True)
+            embed.add_field(name="Status", value="⏳ In attesa", inline=True)
+            embed.set_footer(text="Puoi annullare questo ordine usando il bottone sotto")
             
-            for order_id, item_name, qty, total, location, delivery_time, status, created, customer_id in pending_orders[:5]:
-                try:
-                    customer = bot.get_user(customer_id)
-                    customer_name = customer.display_name if customer else f"User-{customer_id}"
-                except:
-                    customer_name = f"User-{customer_id}"
-                
-                value = (f"**Cliente:** {customer_name}\n"
-                        f"**Oggetto:** {item_name} x{qty}\n"
-                        f"**Totale:** {total:,} ¥\n"
-                        f"**Luogo:** {location}\n"
-                        f"**Orario:** {delivery_time}")
-                
-                pending_embed.add_field(name=f"Ordine #{order_id}", value=value, inline=False)
-            
-            pending_embed.set_footer(text="Gestisci gli ordini dai messaggi privati del bot")
-            embeds.append(pending_embed)
+            view = CustomerOrderView(order_id, supplier_id)
+            embeds.append(embed)
+            views.append(view)
         
-        # Storico ordini completati
+        # Ordini completati/annullati (solo visualizzazione)
         if completed_orders:
-            completed_embed = discord.Embed(
-                title="✅ Ordini Completati",
-                color=discord.Color.green(),
-                description=f"Hai completato {len(completed_orders)} ordini"
+            history_embed = discord.Embed(
+                title="📋 Storico Ordini",
+                color=discord.Color.blue()
             )
             
-            total_earnings = sum(order[3] for order in completed_orders)
-            completed_embed.add_field(
-                name="💰 Guadagni Totali", 
-                value=f"{total_earnings:,} ¥", 
-                inline=False
-            )
+            for order_id, item_name, qty, total, location, delivery_time, status, supplier, created, supplier_id in completed_orders[:5]:
+                status_emoji = "✅" if status == "completed" else "❌" if status == "cancelled" else "⏳"
+                value = (f"**Oggetto:** {item_name} x{qty}\n"
+                        f"**Totale:** {total:,} ¥\n"
+                        f"**Fornitore:** {supplier}\n"
+                        f"**Status:** {status_emoji} {status.upper()}")
+                
+                history_embed.add_field(name=f"Ordine #{order_id}", value=value, inline=False)
             
-            embeds.append(completed_embed)
+            embeds.append(history_embed)
+            views.append(None)
         
-        # Ordini annullati
-        if cancelled_orders:
-            cancelled_embed = discord.Embed(
-                title="❌ Ordini Annullati",
-                color=discord.Color.red(),
-                description=f"{len(cancelled_orders)} ordini annullati"
+        # Invia i messaggi
+        if not embeds:
+            await interaction.response.send_message("📝 Non hai ordini attivi.", ephemeral=True)
+            return
+        
+        # Primo messaggio
+        await interaction.response.send_message(
+            embed=embeds[0], 
+            view=views[0], 
+            ephemeral=True
+        )
+        
+        # Messaggi aggiuntivi
+        for i in range(1, len(embeds)):
+            await interaction.followup.send(
+                embed=embeds[i], 
+                view=views[i], 
+                ephemeral=True
             )
-            embeds.append(cancelled_embed)
+
+# Registra i gruppi di comandi
+bot.tree.add_command(SupplierCommands())
+bot.tree.add_command(CustomerCommands())
+
+# Comando per fornitori per vedere i loro ordini ricevuti
+@bot.tree.command(name='ordini_ricevuti', description='[FORNITORI] Visualizza ordini ricevuti dai clienti')
+async def view_received_orders(interaction: discord.Interaction):
+    conn = sqlite3.connect('pokemmo_marketplace.db')
+    cursor = conn.cursor()
+    
+    # Verifica che sia un fornitore registrato
+    cursor.execute('SELECT user_id FROM suppliers WHERE user_id = ?', (interaction.user.id,))
+    if not cursor.fetchone():
+        await interaction.response.send_message("❌ Devi essere registrato come fornitore!", ephemeral=True)
+        cursor.close()
+        conn.close()
+        return
+    
+    cursor.execute('''
+        SELECT o.id, i.item_name, o.quantity, o.total_price, o.location, 
+               o.delivery_time, o.status, o.created_at, o.customer_id
+        FROM orders o
+        JOIN inventory i ON o.item_id = i.id
+        WHERE o.supplier_id = ?
+        ORDER BY o.created_at DESC
+        LIMIT 15
+    ''', (interaction.user.id,))
+    
+    orders = cursor.fetchall()
+    conn.close()
+    
+    if not orders:
+        await interaction.response.send_message("📝 Non hai ancora ricevuto ordini.", ephemeral=True)
+        return
+    
+    # Separa per status
+    pending_orders = [order for order in orders if order[6] == 'pending']
+    completed_orders = [order for order in orders if order[6] == 'completed']
+    cancelled_orders = [order for order in orders if order[6] == 'cancelled']
+    
+    embeds = []
+    
+    # Ordini pending
+    if pending_orders:
+        pending_embed = discord.Embed(
+            title="⏳ Ordini in Attesa",
+            color=discord.Color.orange(),
+            description=f"Hai {len(pending_orders)} ordini da gestire"
+        )
         
-        # Invia embeds
-        await interaction.response.send_message(embed=embeds[0], ephemeral=True)
+        for order_id, item_name, qty, total, location, delivery_time, status, created, customer_id in pending_orders[:5]:
+            try:
+                customer = bot.get_user(customer_id)
+                customer_name = customer.display_name if customer else f"User-{customer_id}"
+            except:
+                customer_name = f"User-{customer_id}"
+            
+            value = (f"**Cliente:** {customer_name}\n"
+                    f"**Oggetto:** {item_name} x{qty}\n"
+                    f"**Totale:** {total:,} ¥\n"
+                    f"**Luogo:** {location}\n"
+                    f"**Orario:** {delivery_time}")
+            
+            pending_embed.add_field(name=f"Ordine #{order_id}", value=value, inline=False)
         
-        for embed in embeds[1:]:
-            await interaction.followup.send(embed=embed, ephemeral=True)
+        pending_embed.set_footer(text="Gestisci gli ordini dai messaggi privati del bot")
+        embeds.append(pending_embed)
+    
+    # Storico ordini completati
+    if completed_orders:
+        completed_embed = discord.Embed(
+            title="✅ Ordini Completati",
+            color=discord.Color.green(),
+            description=f"Hai completato {len(completed_orders)} ordini"
+        )
+        
+        total_earnings = sum(order[3] for order in completed_orders)
+        completed_embed.add_field(
+            name="💰 Guadagni Totali", 
+            value=f"{total_earnings:,} ¥", 
+            inline=False
+        )
+        
+        embeds.append(completed_embed)
+    
+    # Ordini annullati
+    if cancelled_orders:
+        cancelled_embed = discord.Embed(
+            title="❌ Ordini Annullati",
+            color=discord.Color.red(),
+            description=f"{len(cancelled_orders)} ordini annullati"
+        )
+        embeds.append(cancelled_embed)
+    
+    # Invia embeds
+    await interaction.response.send_message(embed=embeds[0], ephemeral=True)
+    
+    for embed in embeds[1:]:
+        await interaction.followup.send(embed=embed, ephemeral=True)
 
 # Comandi di amministrazione
 @bot.tree.command(name='stats', description='Statistiche del marketplace')
@@ -924,6 +845,12 @@ async def marketplace_stats(interaction: discord.Interaction):
     cursor.execute('SELECT SUM(total_price) FROM orders')
     total_volume = cursor.fetchone()[0] or 0
     
+    cursor.execute('SELECT COUNT(*) FROM orders WHERE status = \'pending\'')
+    pending_orders = cursor.fetchone()[0]
+    
+    cursor.execute('SELECT COUNT(*) FROM orders WHERE status = \'completed\'')
+    completed_orders = cursor.fetchone()[0]
+    
     conn.close()
     
     embed = discord.Embed(
@@ -933,20 +860,18 @@ async def marketplace_stats(interaction: discord.Interaction):
     embed.add_field(name="Fornitori attivi", value=total_suppliers, inline=True)
     embed.add_field(name="Oggetti disponibili", value=total_items, inline=True)
     embed.add_field(name="Ordini totali", value=total_orders, inline=True)
+    embed.add_field(name="Ordini pending", value=pending_orders, inline=True)
+    embed.add_field(name="Ordini completati", value=completed_orders, inline=True)
     embed.add_field(name="Volume scambi", value=f"{total_volume:,} ¥", inline=True)
     
     await interaction.response.send_message(embed=embed)
-
-# Registra i gruppi di comandi
-bot.tree.add_command(SupplierCommands())
-bot.tree.add_command(CustomerCommands())
 
 # Comando di aiuto
 @bot.tree.command(name='aiuto', description='Mostra tutti i comandi disponibili')
 async def help_command(interaction: discord.Interaction):
     embed = discord.Embed(
         title="🎮 PokeMMO Marketplace Bot - Guida",
-        description="Sistema di marketplace per la tua gilda PokeMMO",
+        description="Sistema di marketplace interattivo per la tua gilda PokeMMO",
         color=discord.Color.blue()
     )
     
@@ -954,9 +879,10 @@ async def help_command(interaction: discord.Interaction):
         name="👤 Comandi Fornitore",
         value=(
             "`/fornitore registra` - Registrati come fornitore\n"
-            "`/fornitore aggiungi` - Aggiungi oggetto all'inventario\n"
+            "`/fornitore aggiungi` - Aggiungi/aggiorna oggetto inventario\n"
             "`/fornitore inventario` - Visualizza il tuo inventario\n"
-            "`/fornitore rimuovi` - Rimuovi oggetto dall'inventario"
+            "`/fornitore rimuovi` - Rimuovi oggetto dall'inventario\n"
+            "`/ordini_ricevuti` - **NUOVO!** Visualizza ordini ricevuti"
         ),
         inline=False
     )
@@ -965,25 +891,101 @@ async def help_command(interaction: discord.Interaction):
         name="🛒 Comandi Cliente",
         value=(
             "`/negozio catalogo` - Visualizza tutti gli oggetti\n"
-            "`/negozio ordina` - Effettua un ordine\n"
-            "`/negozio ordini` - Visualizza i tuoi ordini"
+            "`/negozio ordina` - Effettua un ordine **con bottoni!**\n"
+            "`/negozio ordini` - **NUOVO!** Gestisci i tuoi ordini"
         ),
         inline=False
     )
     
     embed.add_field(
-        name="⚙️ Funzionalità",
+        name="🎮 Sistema Interattivo",
         value=(
-            "• Inventario automatico con quantità\n"
-            "• Notifiche private ai fornitori\n"
-            "• Gestione ordini con luogo e orario\n"
-            "• Riduzione automatica delle scorte\n"
-            "• Sistema di tracking ordini"
+            "🔲 **Bottoni nel DM fornitore**: Conferma/Annulla ordini\n"
+            "🔲 **Bottoni per clienti**: Annulla ordini pending\n"
+            "🔔 **Notifiche automatiche**: Status cambio ordini\n"
+            "📦 **Inventario intelligente**: Ripristino automatico\n"
+            "📊 **Tracking completo**: Storico ordini + statistiche"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📝 Flusso Ordini",
+        value=(
+            "1️⃣ Cliente ordina → **Fornitore riceve DM con bottoni**\n"
+            "2️⃣ Fornitore clicca **✅ Conferma** o **❌ Annulla**\n"
+            "3️⃣ Cliente riceve **notifica automatica** del cambio status\n"
+            "4️⃣ Se annullato → **Inventario ripristinato automaticamente**"
         ),
         inline=False
     )
     
     await interaction.response.send_message(embed=embed)
+
+# Comando per testare DM
+@bot.tree.command(name='test_dm', description='Testa invio DM a un utente')
+@app_commands.describe(user_id="ID Discord dell'utente da testare")
+async def test_dm(interaction: discord.Interaction, user_id: str):
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        user_id_int = int(user_id)
+        print(f"🧪 TEST: Tentativo fetch user ID: {user_id_int}")
+        
+        # Usa fetch_user per API call diretta
+        user = await bot.fetch_user(user_id_int)
+        print(f"✅ TEST: User fetchato: {user.display_name} ({user.name})")
+        
+        # Tenta invio DM di test
+        test_embed = discord.Embed(
+            title="🧪 Test DM",
+            description="Questo è un messaggio di test dal marketplace bot!",
+            color=discord.Color.blue(),
+            timestamp=datetime.now()
+        )
+        test_embed.add_field(name="Testato da", value=interaction.user.mention, inline=True)
+        test_embed.add_field(name="Bot funzionante", value="✅ I DM funzionano!", inline=True)
+        test_embed.set_footer(text="Se ricevi questo messaggio, i DM sono OK!")
+        
+        await user.send(embed=test_embed)
+        print(f"✅ TEST: DM di test inviato con successo a {user.display_name}")
+        
+        await interaction.followup.send(
+            f"✅ DM di test inviato con successo a **{user.display_name}** ({user.name})", 
+            ephemeral=True
+        )
+        
+    except ValueError:
+        await interaction.followup.send("❌ ID utente non valido. Deve essere un numero.", ephemeral=True)
+        
+    except discord.NotFound:
+        await interaction.followup.send(f"❌ Utente con ID {user_id} non esiste su Discord", ephemeral=True)
+        print(f"❌ TEST: Utente {user_id} non trovato")
+        
+    except discord.Forbidden:
+        await interaction.followup.send(
+            f"❌ L'utente **{user.display_name}** ha bloccato i DM o il bot", 
+            ephemeral=True
+        )
+        print(f"❌ TEST: DM bloccati per utente {user.display_name}")
+        
+    except discord.HTTPException as e:
+        await interaction.followup.send(f"❌ Errore HTTP Discord: {e}", ephemeral=True)
+        print(f"❌ TEST: Errore HTTP: {e}")
+        
+    except Exception as e:
+        await interaction.followup.send(f"❌ Errore generico: {e}", ephemeral=True)
+        print(f"❌ TEST: Errore generico: {e}")
+
+# Comando per ottenere il proprio ID
+@bot.tree.command(name='mio_id', description='Ottieni il tuo ID Discord')
+async def get_my_id(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        f"🆔 Il tuo ID Discord è: `{interaction.user.id}`\n"
+        f"👤 Username: {interaction.user.display_name}\n"
+        f"💡 Usa questo ID per testare DM con `/test_dm`", 
+        ephemeral=True
+    )
 
 # Health check per Railway
 @bot.event
