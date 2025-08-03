@@ -7,9 +7,9 @@ from datetime import datetime
 import json
 import os
 
-# Configurazione bot
+# Configurazione bot (senza privileged intents)
 intents = discord.Intents.default()
-intents.message_content = True
+# Rimuoviamo message_content che richiede privileged intents
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # Inizializzazione database
