@@ -1,3 +1,5 @@
+# Sistema Ordini Interattivo - Aggiungi DOPO gli import e PRIMA delle classi
+
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -7,69 +9,388 @@ from datetime import datetime
 import json
 import os
 
-# Configurazione bot (senza privileged intents)
-intents = discord.Intents.default()
-# Rimuoviamo message_content che richiede privileged intents
-bot = commands.Bot(command_prefix='!', intents=intents)
+# Classe per i bottoni del fornitore (DM)
+class SupplierOrderView(discord.ui.View):
+    def __init__(self, order_id: int, customer_id: int):
+        super().__init__(timeout=604800)  # 7 giorni timeout
+        self.order_id = order_id
+        self.customer_id = customer_id
 
-# Inizializzazione database
-def init_db():
+    @discord.ui.button(label='✅ Conferma Ordine', style=discord.ButtonStyle.green)
+    async def confirm_order(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        conn = sqlite3.connect('pokemmo_marketplace.db')
+        cursor = conn.cursor()
+        
+        try:
+            # Verifica che l'ordine esista e sia pending
+            cursor.execute('''
+                SELECT o.customer_id, i.item_name, o.quantity, o.total_price, s.username
+                FROM orders o
+                JOIN inventory i ON o.item_id = i.id  
+                JOIN suppliers s ON o.supplier_id = s.user_id
+                WHERE o.id = ? AND o.supplier_id = ? AND o.status = 'pending'
+            ''', (self.order_id, interaction.user.id))
+            
+            order_data = cursor.fetchone()
+            if not order_data:
+                await interaction.followup.send("❌ Ordine non trovato o già processato.", ephemeral=True)
+                return
+            
+            customer_id, item_name, quantity, total_price, supplier_name = order_data
+            
+            # Aggiorna status a completed
+            cursor.execute('''
+                UPDATE orders 
+                SET status = 'completed', completed_at = CURRENT_TIMESTAMP 
+                WHERE id = ?
+            ''', (self.order_id,))
+            
+            conn.commit()
+            
+            # Aggiorna il messaggio del fornitore
+            embed = discord.Embed(
+                title="✅ Ordine Confermato!",
+                color=discord.Color.green(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Ordine #", value=self.order_id, inline=True)
+            embed.add_field(name="Oggetto", value=f"{item_name} x{quantity}", inline=True)
+            embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+            embed.add_field(name="Status", value="✅ COMPLETATO", inline=False)
+            embed.set_footer(text="Ordine completato con successo!")
+            
+            # Rimuovi i bottoni
+            await interaction.edit_original_response(embed=embed, view=None)
+            
+            # Notifica il cliente
+            try:
+                customer = await bot.fetch_user(customer_id)
+                customer_embed = discord.Embed(
+                    title="✅ Il tuo ordine è stato completato!",
+                    color=discord.Color.green(),
+                    timestamp=datetime.now()
+                )
+                customer_embed.add_field(name="Ordine #", value=self.order_id, inline=True)
+                customer_embed.add_field(name="Oggetto", value=f"{item_name} x{quantity}", inline=True)
+                customer_embed.add_field(name="Fornitore", value=supplier_name, inline=True)
+                customer_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+                customer_embed.set_footer(text="Grazie per aver usato PokeMMO Marketplace!")
+                
+                await customer.send(embed=customer_embed)
+                print(f"✅ Notifica completamento inviata al cliente {customer_id}")
+                
+            except Exception as e:
+                print(f"❌ Errore notifica cliente: {e}")
+            
+        except Exception as e:
+            print(f"❌ Errore conferma ordine: {e}")
+            await interaction.followup.send("❌ Errore durante la conferma dell'ordine.", ephemeral=True)
+            conn.rollback()
+            
+        finally:
+            cursor.close()
+            conn.close()
+
+    @discord.ui.button(label='❌ Annulla Ordine', style=discord.ButtonStyle.red)
+    async def cancel_order(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        conn = sqlite3.connect('pokemmo_marketplace.db')
+        cursor = conn.cursor()
+        
+        try:
+            # Verifica che l'ordine esista e sia pending
+            cursor.execute('''
+                SELECT o.customer_id, o.item_id, o.quantity, i.item_name, o.total_price, s.username
+                FROM orders o
+                JOIN inventory i ON o.item_id = i.id
+                JOIN suppliers s ON o.supplier_id = s.user_id  
+                WHERE o.id = ? AND o.supplier_id = ? AND o.status = 'pending'
+            ''', (self.order_id, interaction.user.id))
+            
+            order_data = cursor.fetchone()
+            if not order_data:
+                await interaction.followup.send("❌ Ordine non trovato o già processato.", ephemeral=True)
+                return
+            
+            customer_id, item_id, quantity, item_name, total_price, supplier_name = order_data
+            
+            # Annulla l'ordine
+            cursor.execute('UPDATE orders SET status = \'cancelled\' WHERE id = ?', (self.order_id,))
+            
+            # Ripristina l'inventario
+            cursor.execute('UPDATE inventory SET quantity = quantity + ? WHERE id = ?', (quantity, item_id))
+            
+            conn.commit()
+            
+            # Aggiorna il messaggio del fornitore
+            embed = discord.Embed(
+                title="❌ Ordine Annullato",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Ordine #", value=self.order_id, inline=True)
+            embed.add_field(name="Oggetto", value=f"{item_name} x{quantity}", inline=True)
+            embed.add_field(name="Status", value="❌ ANNULLATO", inline=False)
+            embed.add_field(name="Inventario", value="✅ Quantità ripristinata", inline=False)
+            embed.set_footer(text="Ordine annullato dal fornitore")
+            
+            await interaction.edit_original_response(embed=embed, view=None)
+            
+            # Notifica il cliente
+            try:
+                customer = await bot.fetch_user(customer_id)
+                customer_embed = discord.Embed(
+                    title="❌ Il tuo ordine è stato annullato",
+                    color=discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+                customer_embed.add_field(name="Ordine #", value=self.order_id, inline=True)
+                customer_embed.add_field(name="Oggetto", value=f"{item_name} x{quantity}", inline=True)
+                customer_embed.add_field(name="Fornitore", value=supplier_name, inline=True)
+                customer_embed.add_field(name="Motivo", value="Annullato dal fornitore", inline=False)
+                customer_embed.set_footer(text="L'oggetto è tornato disponibile nel catalogo")
+                
+                await customer.send(embed=customer_embed)
+                print(f"✅ Notifica annullamento inviata al cliente {customer_id}")
+                
+            except Exception as e:
+                print(f"❌ Errore notifica cliente: {e}")
+            
+        except Exception as e:
+            print(f"❌ Errore annullamento ordine: {e}")
+            await interaction.followup.send("❌ Errore durante l'annullamento dell'ordine.", ephemeral=True)
+            conn.rollback()
+            
+        finally:
+            cursor.close()
+            conn.close()
+
+# Classe per i bottoni del cliente
+class CustomerOrderView(discord.ui.View):
+    def __init__(self, order_id: int, supplier_id: int):
+        super().__init__(timeout=604800)  # 7 giorni timeout
+        self.order_id = order_id
+        self.supplier_id = supplier_id
+
+    @discord.ui.button(label='❌ Annulla Ordine', style=discord.ButtonStyle.red)
+    async def cancel_order(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer()
+        
+        conn = sqlite3.connect('pokemmo_marketplace.db')
+        cursor = conn.cursor()
+        
+        try:
+            # Verifica che l'ordine appartenga al cliente e sia pending
+            cursor.execute('''
+                SELECT o.supplier_id, o.item_id, o.quantity, i.item_name, o.total_price, s.username
+                FROM orders o
+                JOIN inventory i ON o.item_id = i.id
+                JOIN suppliers s ON o.supplier_id = s.user_id
+                WHERE o.id = ? AND o.customer_id = ? AND o.status = 'pending'
+            ''', (self.order_id, interaction.user.id))
+            
+            order_data = cursor.fetchone()
+            if not order_data:
+                await interaction.followup.send("❌ Ordine non trovato o già processato.", ephemeral=True)
+                return
+            
+            supplier_id, item_id, quantity, item_name, total_price, supplier_name = order_data
+            
+            # Annulla l'ordine
+            cursor.execute('UPDATE orders SET status = \'cancelled\' WHERE id = ?', (self.order_id,))
+            
+            # Ripristina l'inventario
+            cursor.execute('UPDATE inventory SET quantity = quantity + ? WHERE id = ?', (quantity, item_id))
+            
+            conn.commit()
+            
+            # Conferma annullamento al cliente
+            embed = discord.Embed(
+                title="❌ Ordine Annullato",
+                color=discord.Color.red(),
+                timestamp=datetime.now()
+            )
+            embed.add_field(name="Ordine #", value=self.order_id, inline=True)
+            embed.add_field(name="Oggetto", value=f"{item_name} x{quantity}", inline=True)
+            embed.add_field(name="Fornitore", value=supplier_name, inline=True)
+            embed.add_field(name="Status", value="❌ ANNULLATO", inline=False)
+            embed.set_footer(text="Ordine annullato con successo")
+            
+            await interaction.edit_original_response(embed=embed, view=None)
+            
+            # Notifica il fornitore
+            try:
+                supplier = await bot.fetch_user(supplier_id)
+                supplier_embed = discord.Embed(
+                    title="❌ Ordine annullato dal cliente",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now()
+                )
+                supplier_embed.add_field(name="Ordine #", value=self.order_id, inline=True)
+                supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantity}", inline=True)
+                supplier_embed.add_field(name="Cliente", value=interaction.user.display_name, inline=True)
+                supplier_embed.add_field(name="Inventario", value="✅ Quantità ripristinata automaticamente", inline=False)
+                supplier_embed.set_footer(text="L'oggetto è tornato disponibile nel tuo inventario")
+                
+                await supplier.send(embed=supplier_embed)
+                print(f"✅ Notifica annullamento inviata al fornitore {supplier_id}")
+                
+            except Exception as e:
+                print(f"❌ Errore notifica fornitore: {e}")
+            
+        except Exception as e:
+            print(f"❌ Errore annullamento ordine: {e}")
+            await interaction.followup.send("❌ Errore durante l'annullamento dell'ordine.", ephemeral=True)
+            conn.rollback()
+            
+        finally:
+            cursor.close()
+            conn.close()
+
+# Comando per vedere ordini con bottoni (SOSTITUISCE il comando view_orders)
+@app_commands.command(name='ordini', description='Visualizza i tuoi ordini con opzioni di gestione')
+async def view_orders_interactive(self, interaction: discord.Interaction):
     conn = sqlite3.connect('pokemmo_marketplace.db')
     cursor = conn.cursor()
     
-    # Tabella fornitori
     cursor.execute('''
-        CREATE TABLE IF NOT EXISTS suppliers (
-            user_id INTEGER PRIMARY KEY,
-            username TEXT NOT NULL,
-            active BOOLEAN DEFAULT TRUE
-        )
-    ''')
+        SELECT o.id, i.item_name, o.quantity, o.total_price, o.location, 
+               o.delivery_time, o.status, s.username, o.created_at, o.supplier_id
+        FROM orders o
+        JOIN inventory i ON o.item_id = i.id
+        JOIN suppliers s ON o.supplier_id = s.user_id
+        WHERE o.customer_id = ?
+        ORDER BY o.created_at DESC
+        LIMIT 10
+    ''', (interaction.user.id,))
     
-    # Tabella inventario
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS inventory (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            supplier_id INTEGER,
-            item_name TEXT NOT NULL,
-            quantity INTEGER NOT NULL,
-            price INTEGER NOT NULL,
-            description TEXT,
-            FOREIGN KEY (supplier_id) REFERENCES suppliers (user_id)
-        )
-    ''')
-    
-    # Tabella ordini
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS orders (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            customer_id INTEGER NOT NULL,
-            supplier_id INTEGER NOT NULL,
-            item_id INTEGER NOT NULL,
-            quantity INTEGER NOT NULL,
-            total_price INTEGER NOT NULL,
-            location TEXT NOT NULL,
-            delivery_time TEXT NOT NULL,
-            status TEXT DEFAULT 'pending',
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (item_id) REFERENCES inventory (id),
-            FOREIGN KEY (supplier_id) REFERENCES suppliers (user_id)
-        )
-    ''')
-    
-    conn.commit()
+    orders = cursor.fetchall()
     conn.close()
+    
+    if not orders:
+        await interaction.response.send_message("📝 Non hai ancora effettuato ordini.", ephemeral=True)
+        return
+    
+    # Separa ordini pending dagli altri
+    pending_orders = [order for order in orders if order[6] == 'pending']
+    completed_orders = [order for order in orders if order[6] != 'pending']
+    
+    embeds = []
+    views = []
+    
+    # Ordini pending con bottoni
+    for order_id, item_name, qty, total, location, delivery_time, status, supplier, created, supplier_id in pending_orders:
+        embed = discord.Embed(
+            title=f"⏳ Ordine #{order_id} - IN ATTESA",
+            color=discord.Color.orange(),
+            timestamp=datetime.fromisoformat(created.replace('Z', '+00:00')) if 'Z' in created else datetime.now()
+        )
+        embed.add_field(name="Oggetto", value=f"{item_name} x{qty}", inline=True)
+        embed.add_field(name="Totale", value=f"{total:,} ¥", inline=True)
+        embed.add_field(name="Fornitore", value=supplier, inline=True)
+        embed.add_field(name="Luogo", value=location, inline=True)
+        embed.add_field(name="Orario", value=delivery_time, inline=True)
+        embed.add_field(name="Status", value="⏳ In attesa", inline=True)
+        embed.set_footer(text="Puoi annullare questo ordine usando il bottone sotto")
+        
+        view = CustomerOrderView(order_id, supplier_id)
+        embeds.append(embed)
+        views.append(view)
+    
+    # Ordini completati/annullati (solo visualizzazione)
+    if completed_orders:
+        history_embed = discord.Embed(
+            title="📋 Storico Ordini",
+            color=discord.Color.blue()
+        )
+        
+        for order_id, item_name, qty, total, location, delivery_time, status, supplier, created, supplier_id in completed_orders[:5]:
+            status_emoji = "✅" if status == "completed" else "❌" if status == "cancelled" else "⏳"
+            value = (f"**Oggetto:** {item_name} x{qty}\n"
+                    f"**Totale:** {total:,} ¥\n"
+                    f"**Fornitore:** {supplier}\n"
+                    f"**Status:** {status_emoji} {status.upper()}")
+            
+            history_embed.add_field(name=f"Ordine #{order_id}", value=value, inline=False)
+        
+        embeds.append(history_embed)
+        views.append(None)
+    
+    # Invia i messaggi
+    if not embeds:
+        await interaction.response.send_message("📝 Non hai ordini attivi.", ephemeral=True)
+        return
+    
+    # Primo messaggio
+    await interaction.response.send_message(
+        embed=embeds[0], 
+        view=views[0], 
+        ephemeral=True
+    )
+    
+    # Messaggi aggiuntivi
+    for i in range(1, len(embeds)):
+        await interaction.followup.send(
+            embed=embeds[i], 
+            view=views[i], 
+            ephemeral=True
+        )
 
-@bot.event
-async def on_ready():
-    print(f'🎮 {bot.user} è online e pronto!')
-    print(f'📊 Connesso a {len(bot.guilds)} server(s)')
-    init_db()
+# AGGIORNA anche il comando place_order per includere i bottoni nel DM del fornitore
+# Sostituisci la parte dell'invio DM nel place_order con questa:
+
+async def send_supplier_notification_with_buttons(order_id, supplier_id, supplier_name, item_name, quantita, total_price, luogo, orario, customer):
+    """Invia notifica DM al fornitore con bottoni interattivi"""
+    dm_sent = False
+    dm_error = None
+    
     try:
-        synced = await bot.tree.sync()
-        print(f"✅ Sincronizzati {len(synced)} comandi slash.")
+        print(f"🔍 DEBUG: Tentativo invio DM a fornitore ID: {supplier_id}")
+        
+        supplier = await bot.fetch_user(supplier_id)
+        print(f"✅ DEBUG: Utente fetchato da API: {supplier.display_name} ({supplier.name})")
+        
+        supplier_embed = discord.Embed(
+            title="🛒 Nuovo ordine ricevuto!",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
+        supplier_embed.add_field(name="Cliente", value=customer.display_name, inline=True)
+        supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
+        supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+        supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
+        supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
+        supplier_embed.add_field(name="Contatto Discord", value=f"<@{customer.id}>", inline=False)
+        supplier_embed.set_footer(text="Usa i bottoni sotto per gestire l'ordine")
+        
+        # Crea i bottoni per il fornitore
+        view = SupplierOrderView(order_id, customer.id)
+        
+        await supplier.send(embed=supplier_embed, view=view)
+        dm_sent = True
+        print(f"✅ DEBUG: DM con bottoni inviato con successo a {supplier.display_name}")
+        
+    except discord.NotFound:
+        dm_error = "Utente non esistente su Discord"
+        print(f"❌ DEBUG: Utente {supplier_id} non esiste su Discord")
+        
+    except discord.Forbidden:
+        dm_error = "L'utente ha disabilitato i DM o ha bloccato il bot"
+        print(f"❌ DEBUG: DM bloccati dall'utente {supplier_id} (Forbidden)")
+        
+    except discord.HTTPException as e:
+        dm_error = f"Errore HTTP Discord: {e}"
+        print(f"❌ DEBUG: Errore HTTP inviando DM: {e}")
+        
     except Exception as e:
-        print(f"❌ Errore nella sincronizzazione: {e}")
+        dm_error = f"Errore generico: {e}"
+        print(f"❌ DEBUG: Errore generico inviando DM: {e}")
+    
+    return dm_sent, dm_error
 
 # Gruppo comandi fornitore
 class SupplierCommands(app_commands.Group):
@@ -381,7 +702,7 @@ class CustomerCommands(app_commands.Group):
         
         await interaction.response.send_message(embed=embed)
 
-    # Sostituisci il comando place_order con questa versione corretta
+
 
     @app_commands.command(name='ordina', description='Effettua un ordine')
     @app_commands.describe(
@@ -436,54 +757,13 @@ class CustomerCommands(app_commands.Group):
             
             conn.commit()
             
-            # Invia notifica al fornitore con debug dettagliato
-
-            # Invia notifica al fornitore con FETCH USER (API call)
-            dm_sent = False
-            dm_error = None
+            # Invia notifica al fornitore CON BOTTONI
+            dm_sent, dm_error = await send_supplier_notification_with_buttons(
+                order_id, supplier_id, supplier_name, item_name, 
+                quantita, total_price, luogo, orario, interaction.user
+            )
             
-            try:
-                print(f"🔍 DEBUG: Tentativo invio DM a fornitore ID: {supplier_id}")
-                
-                # CAMBIATO: fetch_user invece di get_user (API call vs cache)
-                supplier = await bot.fetch_user(supplier_id)
-                print(f"✅ DEBUG: Utente fetched da API: {supplier.display_name} ({supplier.name})")
-                
-                supplier_embed = discord.Embed(
-                    title="🛒 Nuovo ordine ricevuto!",
-                    color=discord.Color.orange(),
-                    timestamp=datetime.now()
-                )
-                supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
-                supplier_embed.add_field(name="Cliente", value=interaction.user.display_name, inline=True)
-                supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
-                supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
-                supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
-                supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
-                supplier_embed.add_field(name="Contatto Discord", value=f"<@{interaction.user.id}>", inline=False)
-                supplier_embed.set_footer(text="PokeMMO Marketplace")
-                
-                await supplier.send(embed=supplier_embed)
-                dm_sent = True
-                print(f"✅ DEBUG: DM inviato con successo a {supplier.display_name}")
-                
-            except discord.NotFound:
-                dm_error = "Utente non esistente su Discord"
-                print(f"❌ DEBUG: Utente {supplier_id} non esiste su Discord")
-                
-            except discord.Forbidden:
-                dm_error = "L'utente ha disabilitato i DM o ha bloccato il bot"
-                print(f"❌ DEBUG: DM bloccati dall'utente {supplier_id} (Forbidden)")
-                
-            except discord.HTTPException as e:
-                dm_error = f"Errore HTTP Discord: {e}"
-                print(f"❌ DEBUG: Errore HTTP inviando DM: {e}")
-                
-            except Exception as e:
-                dm_error = f"Errore generico: {e}"
-                print(f"❌ DEBUG: Errore generico inviando DM: {e}")
-            
-            # Invia conferma al cliente (USANDO FOLLOWUP, NON RESPONSE!)
+            # Invia conferma al cliente CON BOTTONE ANNULLA
             embed = discord.Embed(
                 title="✅ Ordine confermato!",
                 color=discord.Color.green(),
@@ -499,15 +779,17 @@ class CustomerCommands(app_commands.Group):
             # Aggiungi stato notifica
             if dm_sent:
                 embed.add_field(name="📨 Notifica", value="✅ Fornitore notificato via DM", inline=False)
-                embed.set_footer(text="Il fornitore ha ricevuto una notifica privata")
+                embed.set_footer(text="Il fornitore ha ricevuto una notifica privata con bottoni di gestione")
             else:
                 embed.add_field(name="📨 Notifica", value=f"❌ DM non inviato: {dm_error}", inline=False)
                 embed.add_field(name="💡 Azione richiesta", value=f"Contatta <@{supplier_id}> manualmente per l'ordine", inline=False)
                 embed.set_footer(text="Notifica DM fallita - contatto manuale necessario")
             
-            # IMPORTANTE: Usa followup.send, NON response.send_message!
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            print(f"✅ DEBUG: Conferma ordine inviata al cliente {interaction.user.display_name}")
+            # Aggiungi bottone annulla per il cliente
+            view = CustomerOrderView(order_id, supplier_id)
+            
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+            print(f"✅ DEBUG: Conferma ordine con bottoni inviata al cliente {interaction.user.display_name}")
             
         except Exception as e:
             print(f"❌ DEBUG: Errore generale nel comando ordina: {e}")
@@ -517,49 +799,111 @@ class CustomerCommands(app_commands.Group):
                 pass  # Se anche followup fallisce, non c'è niente da fare
             
             conn.rollback()
+            
+        finally:
+            cursor.close()
+            conn.close()
                 
             
 
-    @app_commands.command(name='ordini', description='Visualizza i tuoi ordini')
-    async def view_orders(self, interaction: discord.Interaction):
+    
+
+
+    # Comando per fornitori per vedere i loro ordini ricevuti
+    @bot.tree.command(name='ordini_ricevuti', description='[FORNITORI] Visualizza ordini ricevuti dai clienti')
+    async def view_received_orders(interaction: discord.Interaction):
         conn = sqlite3.connect('pokemmo_marketplace.db')
         cursor = conn.cursor()
         
+        # Verifica che sia un fornitore registrato
+        cursor.execute('SELECT user_id FROM suppliers WHERE user_id = ? AND active = TRUE', (interaction.user.id,))
+        if not cursor.fetchone():
+            await interaction.response.send_message("❌ Devi essere registrato come fornitore!", ephemeral=True)
+            cursor.close()
+            conn.close()
+            return
+        
         cursor.execute('''
             SELECT o.id, i.item_name, o.quantity, o.total_price, o.location, 
-                   o.delivery_time, o.status, s.username, o.created_at
+                   o.delivery_time, o.status, o.created_at, o.customer_id
             FROM orders o
             JOIN inventory i ON o.item_id = i.id
-            JOIN suppliers s ON o.supplier_id = s.user_id
-            WHERE o.customer_id = ?
+            WHERE o.supplier_id = ?
             ORDER BY o.created_at DESC
-            LIMIT 10
+            LIMIT 15
         ''', (interaction.user.id,))
         
         orders = cursor.fetchall()
         conn.close()
         
         if not orders:
-            await interaction.response.send_message("📝 Non hai ancora effettuato ordini.", ephemeral=True)
+            await interaction.response.send_message("📝 Non hai ancora ricevuto ordini.", ephemeral=True)
             return
         
-        embed = discord.Embed(
-            title="📝 I tuoi ordini",
-            color=discord.Color.purple()
-        )
+        # Separa per status
+        pending_orders = [order for order in orders if order[6] == 'pending']
+        completed_orders = [order for order in orders if order[6] == 'completed']
+        cancelled_orders = [order for order in orders if order[6] == 'cancelled']
         
-        for order_id, item_name, qty, total, location, delivery_time, status, supplier, created in orders:
-            status_emoji = "⏳" if status == "pending" else "✅" if status == "completed" else "❌"
-            value = (f"**Oggetto:** {item_name} x{qty}\n"
-                    f"**Totale:** {total:,} ¥\n"
-                    f"**Fornitore:** {supplier}\n"
-                    f"**Luogo:** {location}\n"
-                    f"**Orario:** {delivery_time}\n"
-                    f"**Status:** {status_emoji} {status}")
+        embeds = []
+        
+        # Ordini pending
+        if pending_orders:
+            pending_embed = discord.Embed(
+                title="⏳ Ordini in Attesa",
+                color=discord.Color.orange(),
+                description=f"Hai {len(pending_orders)} ordini da gestire"
+            )
             
-            embed.add_field(name=f"Ordine #{order_id}", value=value, inline=False)
+            for order_id, item_name, qty, total, location, delivery_time, status, created, customer_id in pending_orders[:5]:
+                try:
+                    customer = bot.get_user(customer_id)
+                    customer_name = customer.display_name if customer else f"User-{customer_id}"
+                except:
+                    customer_name = f"User-{customer_id}"
+                
+                value = (f"**Cliente:** {customer_name}\n"
+                        f"**Oggetto:** {item_name} x{qty}\n"
+                        f"**Totale:** {total:,} ¥\n"
+                        f"**Luogo:** {location}\n"
+                        f"**Orario:** {delivery_time}")
+                
+                pending_embed.add_field(name=f"Ordine #{order_id}", value=value, inline=False)
+            
+            pending_embed.set_footer(text="Gestisci gli ordini dai messaggi privati del bot")
+            embeds.append(pending_embed)
         
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        # Storico ordini completati
+        if completed_orders:
+            completed_embed = discord.Embed(
+                title="✅ Ordini Completati",
+                color=discord.Color.green(),
+                description=f"Hai completato {len(completed_orders)} ordini"
+            )
+            
+            total_earnings = sum(order[3] for order in completed_orders)
+            completed_embed.add_field(
+                name="💰 Guadagni Totali", 
+                value=f"{total_earnings:,} ¥", 
+                inline=False
+            )
+            
+            embeds.append(completed_embed)
+        
+        # Ordini annullati
+        if cancelled_orders:
+            cancelled_embed = discord.Embed(
+                title="❌ Ordini Annullati",
+                color=discord.Color.red(),
+                description=f"{len(cancelled_orders)} ordini annullati"
+            )
+            embeds.append(cancelled_embed)
+        
+        # Invia embeds
+        await interaction.response.send_message(embed=embeds[0], ephemeral=True)
+        
+        for embed in embeds[1:]:
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
 # Comandi di amministrazione
 @bot.tree.command(name='stats', description='Statistiche del marketplace')
