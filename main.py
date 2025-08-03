@@ -437,38 +437,40 @@ class CustomerCommands(app_commands.Group):
             conn.commit()
             
             # Invia notifica al fornitore con debug dettagliato
+
+            # Invia notifica al fornitore con FETCH USER (API call)
             dm_sent = False
             dm_error = None
             
             try:
-                supplier = bot.get_user(supplier_id)
                 print(f"🔍 DEBUG: Tentativo invio DM a fornitore ID: {supplier_id}")
                 
-                if supplier:
-                    print(f"✅ DEBUG: Utente trovato: {supplier.display_name} ({supplier.name})")
-                    
-                    supplier_embed = discord.Embed(
-                        title="🛒 Nuovo ordine ricevuto!",
-                        color=discord.Color.orange(),
-                        timestamp=datetime.now()
-                    )
-                    supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
-                    supplier_embed.add_field(name="Cliente", value=interaction.user.display_name, inline=True)
-                    supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
-                    supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
-                    supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
-                    supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
-                    supplier_embed.add_field(name="Contatto Discord", value=f"<@{interaction.user.id}>", inline=False)
-                    supplier_embed.set_footer(text="PokeMMO Marketplace", icon_url=bot.user.avatar.url if bot.user.avatar else None)
-                    
-                    await supplier.send(embed=supplier_embed)
-                    dm_sent = True
-                    print(f"✅ DEBUG: DM inviato con successo a {supplier.display_name}")
-                    
-                else:
-                    dm_error = "Utente non trovato nel cache del bot"
-                    print(f"❌ DEBUG: Utente con ID {supplier_id} non trovato nel cache")
-                    
+                # CAMBIATO: fetch_user invece di get_user (API call vs cache)
+                supplier = await bot.fetch_user(supplier_id)
+                print(f"✅ DEBUG: Utente fetched da API: {supplier.display_name} ({supplier.name})")
+                
+                supplier_embed = discord.Embed(
+                    title="🛒 Nuovo ordine ricevuto!",
+                    color=discord.Color.orange(),
+                    timestamp=datetime.now()
+                )
+                supplier_embed.add_field(name="Ordine #", value=order_id, inline=True)
+                supplier_embed.add_field(name="Cliente", value=interaction.user.display_name, inline=True)
+                supplier_embed.add_field(name="Oggetto", value=f"{item_name} x{quantita}", inline=True)
+                supplier_embed.add_field(name="Totale", value=f"{total_price:,} ¥", inline=True)
+                supplier_embed.add_field(name="Luogo consegna", value=luogo, inline=True)
+                supplier_embed.add_field(name="Orario richiesto", value=orario, inline=True)
+                supplier_embed.add_field(name="Contatto Discord", value=f"<@{interaction.user.id}>", inline=False)
+                supplier_embed.set_footer(text="PokeMMO Marketplace")
+                
+                await supplier.send(embed=supplier_embed)
+                dm_sent = True
+                print(f"✅ DEBUG: DM inviato con successo a {supplier.display_name}")
+                
+            except discord.NotFound:
+                dm_error = "Utente non esistente su Discord"
+                print(f"❌ DEBUG: Utente {supplier_id} non esiste su Discord")
+                
             except discord.Forbidden:
                 dm_error = "L'utente ha disabilitato i DM o ha bloccato il bot"
                 print(f"❌ DEBUG: DM bloccati dall'utente {supplier_id} (Forbidden)")
