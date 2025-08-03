@@ -516,61 +516,7 @@ class CustomerCommands(app_commands.Group):
             
             conn.rollback()
                 
-            # Comando debug per testare DM
-    @bot.tree.command(name='test_dm', description='Testa invio DM a un utente')
-    @app_commands.describe(user_id="ID Discord dell'utente da testare")
-    async def test_dm(interaction: discord.Interaction, user_id: str):
-        await interaction.response.defer(ephemeral=True)
-        
-        try:
-            user_id_int = int(user_id)
-            user = bot.get_user(user_id_int)
             
-            if not user:
-                await interaction.followup.send(f"❌ Utente con ID {user_id} non trovato nel cache del bot", ephemeral=True)
-                return
-            
-            # Tenta invio DM di test
-            test_embed = discord.Embed(
-                title="🧪 Test DM",
-                description="Questo è un messaggio di test dal marketplace bot!",
-                color=discord.Color.blue(),
-                timestamp=datetime.now()
-            )
-            test_embed.add_field(name="Testato da", value=interaction.user.mention, inline=True)
-            test_embed.set_footer(text="Se ricevi questo messaggio, i DM funzionano!")
-            
-            await user.send(embed=test_embed)
-            
-            await interaction.followup.send(
-                f"✅ DM di test inviato con successo a {user.display_name} ({user.name})", 
-                ephemeral=True
-            )
-            print(f"✅ Test DM inviato a {user.display_name} da {interaction.user.display_name}")
-            
-        except ValueError:
-            await interaction.followup.send("❌ ID utente non valido. Deve essere un numero.", ephemeral=True)
-            
-        except discord.Forbidden:
-            await interaction.followup.send(
-                f"❌ L'utente {user.display_name} ha bloccato i DM o il bot", 
-                ephemeral=True
-            )
-            print(f"❌ DM bloccati per utente {user.display_name}")
-            
-        except discord.HTTPException as e:
-            await interaction.followup.send(
-                f"❌ Errore HTTP Discord: {e}", 
-                ephemeral=True
-            )
-            print(f"❌ Errore HTTP test DM: {e}")
-            
-        except Exception as e:
-            await interaction.followup.send(
-                f"❌ Errore generico: {e}", 
-                ephemeral=True
-            )
-            print(f"❌ Errore generico test DM: {e}")
 
     @app_commands.command(name='ordini', description='Visualizza i tuoi ordini')
     async def view_orders(self, interaction: discord.Interaction):
